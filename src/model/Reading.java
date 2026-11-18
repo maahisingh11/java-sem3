@@ -34,7 +34,7 @@ public abstract class Reading implements Comparable<Reading> {
     public abstract double get_ratio();
 
     public abstract Severity get_severity();
-  // part of inheritance 
+  // part of inheritance and also to sort chronologically 
     @Override
     public int compareTo(Reading other) {
         return get_effective_time().compareTo(other.get_effective_time());
