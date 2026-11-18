@@ -2,7 +2,7 @@ package model;
 
 import java.time.LocalDateTime;
 import util.Invalid_reading;
-
+// this class records data for a river or segment for a year 
 public class Annual_reading extends Reading {
     private final int year;
     private final double min_value;
@@ -25,6 +25,7 @@ public class Annual_reading extends Reading {
         this.min_value = min_value;
         this.max_value = max_value;
         this.source = source == null || source.isBlank() ? "CPCB " + year : source;
+        //because do low is bad so min value is the worst case 
         if (pollutant == Pollutant.DO) {
             this.value = min_value;
         } else if (pollutant == Pollutant.PH) {
@@ -75,7 +76,7 @@ public class Annual_reading extends Reading {
         return source;
     }
 
-    @Override
+    @Override// calc ratio for severity of fc
     public double get_ratio() {
         if (pollutant == Pollutant.BOD) {
             return max_value / 3.0;
@@ -133,6 +134,7 @@ public class Annual_reading extends Reading {
             return Severity.CRITICAL;
         }
         if (pollutant == Pollutant.FC) {
+            //comes from severity enum
             return Severity.from_ratio(get_ratio());
         }
         return Severity.from_ratio(get_ratio());
