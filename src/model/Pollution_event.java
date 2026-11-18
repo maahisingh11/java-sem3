@@ -16,7 +16,7 @@ public class Pollution_event implements Comparable<Pollution_event> {
     public Reading get_reading() {
         return reading;
     }
-
+ //Sort order: severity (worst first) -> time (newest first) -> station id
     @Override
     public int compareTo(Pollution_event other) {
         int order = other.reading.get_severity().compareTo(reading.get_severity());
