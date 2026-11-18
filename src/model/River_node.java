@@ -1,10 +1,11 @@
 package model;
-
+//abstract class work as interface
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-public abstract class River_node {
+public abstract class River_node //store info about the river location
+{
     private String id;
     private String name;
     private String region;
@@ -17,15 +18,24 @@ public abstract class River_node {
         this.region = region;
     }
 
-    public String get_id() { return id; }
-    public String get_name() { return name; }
-    public String get_region() { return region; }
-    public List<River_node> get_upstream() { return Collections.unmodifiableList(upstream); }
-    public List<River_node> get_downstream() { return Collections.unmodifiableList(downstream); }
+    public String get_id()
+     { return id; }
+    public String get_name()
+     { return name; }
+    public String get_region()
+     { return region; }
+    public List<River_node> get_upstream() 
+    { return Collections.unmodifiableList(upstream); }
+    public List<River_node> get_downstream() 
+    { return Collections.unmodifiableList(downstream);//other parts can just see the list not modified
 
-    public void connect_to(River_node next) {
-        if (!downstream.contains(next)) {
-            downstream.add(next);
+     }
+
+    public void connect_to(River_node next) //connect the downstream and upstream
+    {
+        if (!downstream.contains(next))
+       {
+            downstream.add(next);//add next as downstream and other as it upstream
             next.upstream.add(this);
         }
     }

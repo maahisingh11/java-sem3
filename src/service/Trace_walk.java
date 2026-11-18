@@ -3,21 +3,28 @@ package service;
 import model.River_node;
 import java.util.*;
 
-public class Trace_walk {
-    public static List<River_node> run(River_node start, boolean upstream, boolean depth_first) {
-        List<River_node> result = new ArrayList<>();
-        Set<String> visited = new HashSet<>();
-        visited.add(start.get_id());
-        if (depth_first) {
+public class Trace_walk 
+{
+    public static List<River_node> run(River_node start, boolean upstream, boolean depth_first) 
+    {
+        List<River_node> result = new ArrayList<>();//store node found during transversal
+        Set<String> visited = new HashSet<>();//id discovered
+        visited.add(start.get_id());//first id get added
+        if (depth_first)
+         {
             visit(start, upstream, visited, result);
-        } else {
+        } else//bfs implementation
+             {
             Queue<River_node> queue = new LinkedList<>();
             queue.add(start);
-            while (!queue.isEmpty()) {
+            while (!queue.isEmpty())
+                 {
                 River_node current = queue.remove();
                 List<River_node> neighbours = upstream ? current.get_upstream() : current.get_downstream();
-                for (River_node next : neighbours) {
-                    if (visited.add(next.get_id())) {
+                for (River_node next : neighbours)
+                     {
+                    if (visited.add(next.get_id())) 
+                        {
                         result.add(next);
                         queue.add(next);
                     }

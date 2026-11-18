@@ -5,9 +5,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
-
+//this read the segment and connect the segment and perform bfs and dfs on segment
 public class Segment_network {
-    public static class Segment {
+    public static class Segment 
+    {
         public final String id;
         public final String next;
         public final double longitude;
@@ -23,20 +24,22 @@ public class Segment_network {
         }
     }
 
-    public static class Walk_result {
-        public final List<String> order = new ArrayList<>();
-        public final Map<String, String> parent = new LinkedHashMap<>();
-        public final List<String> station_ids = new ArrayList<>();
+    public static class Walk_result //result of bfs and dfs
+    {
+        public final List<String> order = new ArrayList<>();//order of walk
+        public final Map<String, String> parent = new LinkedHashMap<>();//parent list
+        public final List<String> station_ids = new ArrayList<>();//id discovered
         public final List<String[]> edges = new ArrayList<>();
     }
 
-    public static class Route_result {
+    public static class Route_result 
+    {
         public final List<String> segments = new ArrayList<>();
         public final List<String[]> edges = new ArrayList<>();
         public boolean found;
         public boolean same_segment;
         public boolean same_station;
-        public int hops;
+        public int hops;//connection between segments
     }
 
     private final Map<String, Segment> segment_map = new LinkedHashMap<>();
@@ -50,7 +53,7 @@ public class Segment_network {
         load_station_mapping(folder.resolve("station_mapping.csv"));
         build_links();
     }
-
+//load segment and assign them to hash map
     private void load_segments(Path file) throws IOException {
         List<String> rows = Files.readAllLines(file, StandardCharsets.UTF_8);
         for (int i = 1; i < rows.size(); i++) {
@@ -67,7 +70,7 @@ public class Segment_network {
             downstream.put(segment.id, new ArrayList<>());
         }
     }
-
+//load station and assign them to object
     private void load_station_mapping(Path file) throws IOException {
         List<String> rows = Files.readAllLines(file, StandardCharsets.UTF_8);
         for (int i = 1; i < rows.size(); i++) {
@@ -85,6 +88,7 @@ public class Segment_network {
         }
     }
 
+    //assign upstream and dowsnstream
     private void build_links() throws IOException {
         for (Segment segment : segment_rows) {
             if (segment.next.isEmpty() || segment.next.equals("0")) continue;
@@ -103,7 +107,7 @@ public class Segment_network {
     public String get_station_segment(String station_id) {
         return station_segments.get(station_id);
     }
-
+//tracing of walk minimum path by bfs
     public Walk_result trace(String station_id, boolean trace_upstream, boolean depth_first) {
         String start = station_segments.get(station_id);
         if (start == null) throw new IllegalArgumentException("No river segment is mapped to station " + station_id);
