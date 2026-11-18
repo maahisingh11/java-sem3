@@ -1,20 +1,30 @@
 let state = null;
-let settings = {station: '1067', pollutant: 'BOD', until: '', algorithm: 'BFS'};
+let settings = {station: '1067', pollutant: 'BOD', until: ''};
 let active_view = 'overview';
 let request_number = 0;
-let trace_count = 0;
+let river_geometry = null;
+let river_network = null;
+let trace_data = null;
+let route_data = null;
+let trace_revealed = 0;
+let trace_timer = null;
+let trace_request = 0;
+let map_view = {scale: 1, x: 0, y: 0};
+let map_drag = null;
+let map_bounds = null;
 let editing = null;
 let deleting = null;
 let saving = false;
 
 const find = id => document.getElementById(id);
-const names = {overview: 'Overview', stations: 'Stations', events: 'Pollution & analysis', history: 'Reading history'};
-const titles = {overview: 'A closer look at your rivers.', stations: 'Every station, one place.', events: 'Follow up on what matters.', history: 'A record of every reading.'};
+const names = {overview: 'Overview', stations: 'Stations', events: 'Pollution & analysis', history: 'Reading history', river_explorer: 'River Explorer'};
+const titles = {overview: 'A closer look at your rivers.', stations: 'Every station, one place.', events: 'Follow up on what matters.', history: 'A record of every reading.', river_explorer: 'Explore the river network.'};
 const descriptions = {
     overview: 'Review conditions, investigate events and keep your records up to date.',
     stations: 'Search, filter and select a station to review its available evidence.',
     events: 'Inspect pollution events, repeated exceedances and priority locations.',
-    history: 'Review past samples, correct a reading or export the records you need.'
+    history: 'Review past samples, correct a reading or export the records you need.',
+    river_explorer: 'Trace connected river reaches and monitoring stations using Java BFS or DFS.'
 };
 
 function escape_text(value) {
@@ -64,6 +74,7 @@ function message(text, error = false) {
 
 function show_view(view) {
     if (!names[view]) return;
+    if (active_view === 'river_explorer' && view !== 'river_explorer') pause_trace_playback();
     active_view = view;
     document.querySelectorAll('.view').forEach(section => section.hidden = section.id !== view);
     document.querySelectorAll('nav [data-view]').forEach(button => {
@@ -71,34 +82,59 @@ function show_view(view) {
         if (button.dataset.view === view) button.setAttribute('aria-current', 'page');
         else button.removeAttribute('aria-current');
     });
+    find('content_layout').classList.toggle('explorer_mode', view === 'river_explorer');
+    find('focus_panel').hidden = view === 'river_explorer';
     find('breadcrumb').textContent = names[view];
     find('page_title').textContent = titles[view];
     find('page_description').textContent = descriptions[view];
+    if (view === 'river_explorer') {
+        find('explorer_start').value = settings.station;
+        draw_river_map();
+        render_explorer_results();
+    }
 }
 
 async function load(changes = {}) {
     const candidate = {...settings, ...changes};
+    const context_changed = state && (candidate.station !== settings.station || candidate.pollutant !== settings.pollutant || candidate.until !== settings.until);
+    if (context_changed) clear_explorer_results('The selection changed. Run a new trace or route.');
     const number = ++request_number;
     document.querySelector('main').setAttribute('aria-busy', 'true');
     try {
-        const response = await fetch('/api/state?' + new URLSearchParams(candidate));
-        const data = await response.json();
+        const query = new URLSearchParams(candidate);
+        const [state_response, network_response] = await Promise.all([
+            fetch('/api/state?' + query),
+            fetch('/api/network?' + new URLSearchParams({pollutant: candidate.pollutant, until: candidate.until}) )
+        ]);
+        const [data, network_data] = await Promise.all([state_response.json(), network_response.json()]);
         if (number !== request_number) return false;
-        if (!response.ok) throw new Error(data.error);
+        if (!state_response.ok) throw new Error(data.error);
+        if (!network_response.ok) throw new Error(network_data.error || 'Could not load the river network.');
+        if (!river_geometry) {
+            const geometry_response = await fetch('/network.geojson');
+            if (!geometry_response.ok) throw new Error('The original river geometry could not be loaded.');
+            river_geometry = await geometry_response.json();
+        }
+        if (number !== request_number) return false;
         settings = candidate;
         state = data;
+        river_network = network_data;
         if (!find('station').options.length) {
             const options = state.stations.map(station => '<option value="' + escape_text(station.id) + '">' + escape_text(station.name) + ' (' + escape_text(station.id) + ')</option>').join('');
             find('station').innerHTML = options;
             find('new_station').innerHTML = options;
+            find('explorer_start').innerHTML = options;
+            find('explorer_destination').innerHTML = options;
+            find('explorer_destination').value = state.stations.some(station => station.id === '1071') ? '1071' : state.stations[0].id;
             const regions = [...new Set(state.stations.map(station => station.region))].sort();
             find('region').innerHTML = '<option value="">All regions</option>' + regions.map(region => '<option>' + escape_text(region) + '</option>').join('');
         }
         find('station').value = settings.station;
         find('pollutant').value = settings.pollutant;
         find('until').value = settings.until;
-        find('algorithm').value = settings.algorithm;
-        trace_count = 0;
+        find('explorer_start').value = settings.station;
+        find('new_station').value = settings.station;
+        if (!find('explorer_destination').value) find('explorer_destination').value = state.stations.some(station => station.id === '1071') ? '1071' : state.stations[0].id;
         render();
         return true;
     } catch (error) {
@@ -106,7 +142,6 @@ async function load(changes = {}) {
             find('station').value = settings.station;
             find('pollutant').value = settings.pollutant;
             find('until').value = settings.until;
-            find('algorithm').value = settings.algorithm;
             message(error.message || 'Cannot reach the Java server. Keep the run window open.', true);
         }
         return false;
@@ -127,7 +162,8 @@ function render() {
     render_stations();
     render_events();
     render_history();
-    render_trace();
+    draw_river_map();
+    render_explorer_results();
 }
 
 function focus_station() {
@@ -216,25 +252,291 @@ function render_history() {
     find('next').disabled = !state.times.length || (settings.until && !state.times.some(time => time > settings.until));
 }
 
-function render_trace() {
-    const direction = find('trace_direction').value;
-    const rows = state[direction];
-    trace_count = Math.min(trace_count, rows.length);
-    find('trace_title').textContent = 'Trace from ' + focus_station().name;
-    find('trace_summary').textContent = rows.length + ' connected locations · ' + direction + ' · ' + settings.algorithm;
-    find('algorithm_explanation').textContent = settings.algorithm === 'BFS' ? 'Breadth-first search visits nearer connections before moving farther away.' : 'Depth-first search follows one branch before returning to explore another.';
-    find('trace_progress').textContent = trace_count + ' of ' + rows.length + ' shown';
-    find('trace_next').disabled = trace_count >= rows.length;
-    find('trace_all').disabled = trace_count >= rows.length;
-    find('trace_list').innerHTML = rows.slice(0, trace_count).map((node, index) => '<li><b>' + (index + 1) + '. ' + escape_text(node.name) + '</b>' + (node.type === 'Monitoring station' ? badge(node.reading) : '') + '<small>' + escape_text(node.type + ' · ' + node.region) + (node.reading ? ' · ' + format_value(node.reading) + ' · ' + date_text(node.reading.time) : '') + '</small></li>').join('');
-    find('trace_note').textContent = !rows.length ? 'There are no connected locations in this direction.' : trace_count === 0 ? 'Select Show next step to inspect the Java traversal order, or Show all for the complete list.' : 'The starting station is excluded. Reading evidence respects the current historical cutoff.';
+
+function pause_trace_playback() {
+    if (trace_timer !== null) {
+        clearInterval(trace_timer);
+        trace_timer = null;
+    }
+    if (find('play_trace')) find('play_trace').textContent = 'Play';
 }
 
-function open_trace() {
+function clear_explorer_results(text) {
+    trace_request++;
+    pause_trace_playback();
+    trace_data = null;
+    route_data = null;
+    trace_revealed = 0;
+    if (find('explorer_results')) find('explorer_results').innerHTML = '<div class="empty">' + escape_text(text || 'Choose a starting station, direction and algorithm, then select Trace river.') + '</div>';
+    if (find('trace_progress_label')) find('trace_progress_label').textContent = 'Run a trace to inspect the returned traversal.';
+    if (find('play_trace')) find('play_trace').disabled = true;
+    if (find('trace_step')) find('trace_step').disabled = true;
+    if (find('trace_all')) find('trace_all').disabled = true;
+    if (find('reset_trace')) find('reset_trace').disabled = true;
+    apply_map_highlights();
+}
+
+function map_coordinates(point) {
+    const span_x = map_bounds.max_x - map_bounds.min_x || 1;
+    const span_y = map_bounds.max_y - map_bounds.min_y || 1;
+    const scale = Math.min(760 / (span_x * 0.88), 450 / span_y);
+    const width = span_x * 0.88 * scale;
+    const height = span_y * scale;
+    return [(900 - width) / 2 + (point[0] - map_bounds.min_x) * 0.88 * scale,
+        (550 - height) / 2 + (map_bounds.max_y - point[1]) * scale];
+}
+
+function draw_river_map() {
+    if (!river_geometry || !river_network || !find('river_map')) return;
+    const svg = find('river_map');
+    if (!map_bounds) {
+        const points = river_geometry.features.flatMap(feature => feature.geometry.coordinates);
+        map_bounds = {
+            min_x: Math.min(...points.map(point => point[0])),
+            max_x: Math.max(...points.map(point => point[0])),
+            min_y: Math.min(...points.map(point => point[1])),
+            max_y: Math.max(...points.map(point => point[1]))
+        };
+    }
+    const segments = new Map(river_network.segments.map(segment => [segment.id, segment]));
+    let html = '<text class="map_title" x="24" y="28">GANGA BASIN / HYDRORIVERS REACHES</text><text class="map_title" x="855" y="28">N ↑</text><g id="map_layer">';
+    for (const feature of river_geometry.features) {
+        const points = feature.geometry.coordinates.map(point => map_coordinates(point).join(',')).join(' ');
+        html += '<polyline class="river_line" data-reach="' + escape_text(feature.properties.id) + '" points="' + points + '" />';
+    }
+    for (const station of river_network.stations) {
+        const segment = segments.get(station.segment_id);
+        if (!segment) continue;
+        const point = map_coordinates([segment.longitude, segment.latitude]);
+        const active = station.id === settings.station;
+        const status_class = station.status === 'NO DATA' ? 'missing_station' : station.status === 'NORMAL' ? 'normal_station' : 'flagged_station';
+        html += '<g class="station_pin ' + status_class + (active ? ' selected_station' : '') + '" data-station="' + escape_text(station.id) + '" role="button" tabindex="0" aria-label="Select ' + escape_text(station.name) + '">';
+        if (active) html += '<circle class="station_halo" cx="' + point[0] + '" cy="' + point[1] + '" r="13"></circle>';
+        html += '<circle class="station_dot" cx="' + point[0] + '" cy="' + point[1] + '" r="' + (active ? 6.5 : 5) + '"><title>' + escape_text(station.name) + ' · ' + escape_text(station.status) + '</title></circle>';
+        if (active) html += '<text class="map_label" x="' + (point[0] - 9) + '" y="' + (point[1] - 17) + '" text-anchor="end">' + escape_text(station.name) + '</text>';
+        html += '</g>';
+    }
+    html += '</g>';
+    svg.innerHTML = html;
+    svg.querySelectorAll('[data-station]').forEach(marker => {
+        marker.addEventListener('click', () => select_explorer_station(marker.dataset.station));
+        marker.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                select_explorer_station(marker.dataset.station);
+            }
+        });
+    });
+    set_map_transform();
+    apply_map_highlights();
+}
+
+function apply_map_highlights() {
+    const svg = find('river_map');
+    if (!svg) return;
+    const visited = new Set();
+    if (trace_data) {
+        trace_data.segments.slice(0, trace_revealed).forEach(segment => visited.add(segment.id));
+    }
+    const route = new Set(route_data && route_data.found ? route_data.segments : []);
+    svg.querySelectorAll('[data-reach]').forEach(line => {
+        const id = line.dataset.reach;
+        line.classList.toggle('trace_visited', visited.has(id));
+        line.classList.toggle('route_selected', route.has(id));
+    });
+}
+
+function station_status_markup(station) {
+    const reading = station.reading;
+    const status = station.status || 'NO DATA';
+    const value = reading ? format_value(reading) : 'No reading available';
+    const time = reading ? date_text(reading.time) : 'Missing data';
+    return '<span class="badge ' + (status === 'NO DATA' ? 'NO_DATA' : status) + '">' + escape_text(status) + '</span><small>' + escape_text(station.region) + ' · ' + escape_text(value) + ' · ' + escape_text(time) + '</small>';
+}
+
+function render_explorer_results() {
+    if (!find('explorer_results')) return;
+    if (trace_data) {
+        const shown_segments = new Set(trace_data.segments.slice(0, trace_revealed).map(segment => segment.id));
+        const reached = trace_data.stations.filter(station => shown_segments.has(station.segment_id));
+        const flagged = reached.filter(station => station.reading && station.reading.severity !== 'NORMAL');
+        const missing = reached.filter(station => !station.reading);
+        const direction_label = trace_data.direction === 'upstream' ? 'Candidate upstream stations' : 'Connected downstream stations';
+        const rows = reached.length ? '<div class="result_station_list">' + reached.map(station => '<div class="result_station"><div><b>' + escape_text(station.name) + ' <span>(' + escape_text(station.id) + ')</span></b>' + station_status_markup(station) + '</div></div>').join('') + '</div>' : '<div class="empty">' + (trace_revealed === 0 ? 'No traversal steps are displayed yet.' : 'No additional monitoring stations are mapped to the displayed segments.') + '</div>';
+        find('explorer_results').innerHTML = '<div class="result_heading"><b>' + escape_text(trace_data.algorithm) + ' · ' + escape_text(trace_data.direction) + '</b><span>' + trace_revealed + ' / ' + trace_data.segment_count + ' segments shown</span></div>' +
+            '<div class="result_stats"><div><small>River segments visited</small><strong>' + trace_revealed + ' / ' + trace_data.segment_count + '</strong></div><div><small>Monitoring stations reached</small><strong>' + reached.length + ' / ' + trace_data.station_count + '</strong></div><div><small>Flagged stations</small><strong>' + flagged.length + ' / ' + trace_data.flagged_count + '</strong></div></div>' +
+            '<p class="hint result_hint">' + direction_label + '. Stations mapped to the starting reach are excluded because their within-reach order is unknown. Flagged stations are ' + (trace_data.direction === 'upstream' ? 'candidates for investigation, not proven sources.' : 'connected locations, not confirmed polluted sites.') + '</p>' +
+            (missing.length ? '<p class="missing_note">' + missing.length + ' reached station(s) have no reading for the selected parameter and time. They are not counted as normal.</p>' : '') + rows;
+        find('trace_progress_label').textContent = 'Traversal progress: ' + trace_revealed + ' of ' + trace_data.segment_count + ' river segments shown.';
+        find('play_trace').disabled = trace_data.segment_count === 0;
+        find('trace_step').disabled = trace_revealed >= trace_data.segment_count;
+        find('trace_all').disabled = trace_revealed >= trace_data.segment_count;
+        find('reset_trace').disabled = trace_revealed === 0;
+        apply_map_highlights();
+        return;
+    }
+    if (route_data) {
+        if (!route_data.found) {
+            find('explorer_results').innerHTML = '<div class="route_message no_route"><b>No downstream route found.</b><p>No directed downstream path connects ' + escape_text(route_data.start_name) + ' to ' + escape_text(route_data.destination_name) + ' in the included river network. Any previous route highlight has been cleared.</p></div>';
+        } else {
+            let note = route_data.same_station ? 'The start and destination are the same station, so the valid route contains one mapped segment and zero graph edges.' : route_data.same_segment ? 'Both stations map to the same river segment. The source data does not provide within-segment station order.' : 'The route follows directed downstream links. BFS finds a path with the fewest graph edges; the result is not kilometre-minimised.';
+            find('explorer_results').innerHTML = '<div class="route_message"><b>Downstream route found</b><div class="route_stats"><span><strong>' + route_data.segments.length + '</strong> segments</span><span><strong>' + route_data.hops + '</strong> graph edges</span></div><p>' + note + '</p><details><summary>Route segment IDs</summary><p class="segment_ids">' + route_data.segments.map(escape_text).join(' → ') + '</p></details></div>';
+        }
+        find('trace_progress_label').textContent = route_data.found ? 'Route displayed from ' + route_data.start_name + ' to ' + route_data.destination_name + '.' : 'No route is highlighted.';
+        apply_map_highlights();
+        return;
+    }
+    find('explorer_results').innerHTML = '<div class="empty">Choose a starting station, direction and algorithm, then select Trace river.</div>';
+    find('trace_progress_label').textContent = 'Run a trace to inspect the returned traversal.';
+    apply_map_highlights();
+}
+
+function select_explorer_station(id) {
+    if (!state || !state.stations.some(station => station.id === id)) return;
+    find('explorer_start').value = id;
+    message('');
+    load({station: id});
+}
+
+async function run_explorer_trace() {
     if (!state) return;
-    trace_count = 0;
-    render_trace();
-    find('trace_dialog').showModal();
+    clear_explorer_results('');
+    const ticket = ++trace_request;
+    const button = find('trace_river');
+    button.disabled = true;
+    const start = find('explorer_start').value;
+    const direction = find('explorer_direction').value;
+    const algorithm = find('explorer_algorithm').value;
+    const query = new URLSearchParams({station: start, direction, algorithm, pollutant: settings.pollutant, until: settings.until});
+    try {
+        const response = await fetch('/api/trace?' + query);
+        const data = await response.json();
+        if (ticket !== trace_request || start !== settings.station || direction !== find('explorer_direction').value || algorithm !== find('explorer_algorithm').value) return;
+        if (!response.ok) throw new Error(data.error || 'The Java trace could not be completed.');
+        trace_data = data;
+        trace_revealed = 0;
+        route_data = null;
+        render_explorer_results();
+    } catch (error) {
+        if (ticket === trace_request) {
+            find('explorer_results').innerHTML = '<div class="empty error_text">' + escape_text(error.message) + '</div>';
+        }
+    } finally {
+        if (ticket === trace_request) button.disabled = false;
+    }
+}
+
+function reveal_trace_step() {
+    if (!trace_data || trace_revealed >= trace_data.segment_count) return;
+    trace_revealed++;
+    render_explorer_results();
+}
+
+function play_trace_playback() {
+    if (trace_timer !== null) {
+        pause_trace_playback();
+        return;
+    }
+    if (!trace_data || trace_data.segment_count === 0) return;
+    if (trace_revealed >= trace_data.segment_count) trace_revealed = 0;
+    find('play_trace').textContent = 'Pause';
+    render_explorer_results();
+    trace_timer = setInterval(() => {
+        if (!trace_data || active_view !== 'river_explorer') {
+            pause_trace_playback();
+            return;
+        }
+        trace_revealed++;
+        render_explorer_results();
+        if (trace_revealed >= trace_data.segment_count) pause_trace_playback();
+    }, 180);
+}
+
+function reset_trace_progress() {
+    pause_trace_playback();
+    if (!trace_data) return;
+    trace_revealed = 0;
+    route_data = null;
+    render_explorer_results();
+}
+
+async function find_downstream_route() {
+    if (!state) return;
+    clear_explorer_results('');
+    const ticket = ++trace_request;
+    const button = find('find_route');
+    button.disabled = true;
+    const start = find('explorer_start').value;
+    const destination = find('explorer_destination').value;
+    const query = new URLSearchParams({start, destination, pollutant: settings.pollutant, until: settings.until});
+    try {
+        const response = await fetch('/api/route?' + query);
+        const data = await response.json();
+        if (ticket !== trace_request || start !== settings.station || destination !== find('explorer_destination').value) return;
+        if (!response.ok) throw new Error(data.error || 'The Java route search could not be completed.');
+        route_data = data;
+        trace_data = null;
+        render_explorer_results();
+    } catch (error) {
+        if (ticket === trace_request) find('explorer_results').innerHTML = '<div class="empty error_text">' + escape_text(error.message) + '</div>';
+    } finally {
+        if (ticket === trace_request) button.disabled = false;
+    }
+}
+
+function set_map_transform() {
+    const layer = find('map_layer');
+    if (layer) layer.setAttribute('transform', 'translate(' + map_view.x + ' ' + map_view.y + ') scale(' + map_view.scale + ')');
+}
+
+function zoom_map(factor, anchor = {x: 450, y: 275}) {
+    const next = Math.max(1, Math.min(8, map_view.scale * factor));
+    const ratio = next / map_view.scale;
+    map_view.x = anchor.x - (anchor.x - map_view.x) * ratio;
+    map_view.y = anchor.y - (anchor.y - map_view.y) * ratio;
+    map_view.scale = next;
+    set_map_transform();
+}
+
+function reset_map_view() {
+    map_view = {scale: 1, x: 0, y: 0};
+    set_map_transform();
+}
+
+function svg_point(event) {
+    const svg = find('river_map');
+    const point = svg.createSVGPoint();
+    point.x = event.clientX;
+    point.y = event.clientY;
+    return point.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+function setup_map_controls() {
+    const svg = find('river_map');
+    svg.addEventListener('wheel', event => {
+        event.preventDefault();
+        const point = svg_point(event);
+        zoom_map(event.deltaY < 0 ? 1.18 : 1 / 1.18, point);
+    }, {passive: false});
+    svg.addEventListener('pointerdown', event => {
+        if (event.button !== 0 || event.target.closest('[data-station]')) return;
+        map_drag = {point: svg_point(event), x: map_view.x, y: map_view.y};
+        svg.setPointerCapture(event.pointerId);
+        svg.classList.add('dragging');
+    });
+    svg.addEventListener('pointermove', event => {
+        if (!map_drag) return;
+        const point = svg_point(event);
+        map_view.x = map_drag.x + point.x - map_drag.point.x;
+        map_view.y = map_drag.y + point.y - map_drag.point.y;
+        set_map_transform();
+    });
+    const stop_drag = () => { map_drag = null; svg.classList.remove('dragging'); };
+    svg.addEventListener('pointerup', stop_drag);
+    svg.addEventListener('pointercancel', stop_drag);
+    find('zoom_in').addEventListener('click', () => zoom_map(1.25));
+    find('zoom_out').addEventListener('click', () => zoom_map(0.8));
+    find('reset_view').addEventListener('click', reset_map_view);
 }
 
 async function step(direction) {
@@ -291,6 +593,7 @@ async function save_reading(event) {
         const data = await post(editing ? '/api/update' : '/api/readings', values);
         find('reading_dialog').close();
         message(data.message);
+        clear_explorer_results('A reading was changed. Run a new trace to refresh station statuses.');
         await load({station: values.station, pollutant: values.pollutant, until: ''});
         show_view('history');
     } catch (error) {
@@ -317,6 +620,7 @@ async function delete_reading() {
         const data = await post('/api/delete', {station: deleting.station, pollutant: deleting.pollutant, old_time: deleting.time, old_value: deleting.value});
         find('delete_dialog').close();
         message(data.message);
+        clear_explorer_results('A reading was deleted. Run a new trace to refresh station statuses.');
         await load();
     } catch (error) {
         find('delete_message').textContent = error.message;
@@ -362,6 +666,7 @@ document.addEventListener('click', async event => {
     if (button.dataset.view) show_view(button.dataset.view);
     if (button.hasAttribute('data-add')) open_reading();
     if (button.dataset.close && !saving) find(button.dataset.close).close();
+    if (button.dataset.explorerStation && state) select_explorer_station(button.dataset.explorerStation);
     if (button.dataset.focus && state) {
         message('');
         if (await load({station: button.dataset.focus}) && button.dataset.history) {
@@ -392,17 +697,23 @@ for (const id of ['event_scope', 'event_severity', 'event_sort']) find(id).addEv
 find('history_search').addEventListener('input', () => { if (state) render_history(); });
 find('history_status').addEventListener('change', () => { if (state) render_history(); });
 find('clear_history').addEventListener('click', clear_history);
-find('open_trace').addEventListener('click', open_trace);
-find('try_trace').addEventListener('click', async () => { if (await load({station: '1067'})) open_trace(); });
-find('trace_direction').addEventListener('change', () => { trace_count = 0; if (state) render_trace(); });
-find('algorithm').addEventListener('change', () => load({algorithm: find('algorithm').value}));
-find('trace_next').addEventListener('click', () => { trace_count++; render_trace(); });
-find('trace_all').addEventListener('click', () => { trace_count = state[find('trace_direction').value].length; render_trace(); });
-find('trace_reset').addEventListener('click', () => { trace_count = 0; render_trace(); });
+find('open_trace').addEventListener('click', () => show_view('river_explorer'));
+find('try_trace').addEventListener('click', async () => { if (await load({station: '1067'})) show_view('river_explorer'); });
+find('explorer_start').addEventListener('change', () => select_explorer_station(find('explorer_start').value));
+find('explorer_direction').addEventListener('change', () => clear_explorer_results('Direction changed. Run Trace river to calculate a new traversal.'));
+find('explorer_algorithm').addEventListener('change', () => clear_explorer_results('Algorithm changed. Run Trace river to calculate a new traversal.'));
+find('explorer_destination').addEventListener('change', () => clear_explorer_results('Destination changed. Run a new trace or route.'));
+find('trace_river').addEventListener('click', run_explorer_trace);
+find('play_trace').addEventListener('click', play_trace_playback);
+find('trace_step').addEventListener('click', reveal_trace_step);
+find('trace_all').addEventListener('click', () => { if (trace_data) { trace_revealed = trace_data.segment_count; pause_trace_playback(); render_explorer_results(); } });
+find('reset_trace').addEventListener('click', reset_trace_progress);
+find('find_route').addEventListener('click', find_downstream_route);
 find('previous').addEventListener('click', () => step(-1));
 find('next').addEventListener('click', () => step(1));
 find('reading_form').addEventListener('submit', save_reading);
 find('confirm_delete').addEventListener('click', delete_reading);
 find('export').addEventListener('click', export_history);
 for (const id of ['reading_dialog', 'delete_dialog']) find(id).addEventListener('cancel', event => { if (saving) event.preventDefault(); });
+setup_map_controls();
 load();

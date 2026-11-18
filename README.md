@@ -50,7 +50,7 @@ Create a Java Project with Java 17 or newer, turn off `module-info` creation, th
 
 - **Overview Dashboard**: Stations needing attention based on threshold exceedance, highest-priority pollution events, active thresholds, and quick trace links.
 - **Station Directory**: Search by name, ID, or region; filter by region and severity status; sort by name, risk/severity, or reporting period.
-- **Tracing Connections**: Java BFS and DFS upstream (candidate contributors) and downstream (potentially affected locations) traversal from any selected station, with numbered step-by-step navigation, "Show next step", "Show all", and "Reset" controls. No visualization graphs or charts.
+- **River Explorer**: A separate navigation page using the original HydroRIVERS river geometry and the station-to-segment mapping. Java performs upstream/downstream BFS and DFS over directed river-segment connections and returns traversal predecessors for segment highlighting. Playback supports Play, Pause, resume, next step, show all and reset trace. Map pan/zoom and Reset view are separate from trace reset. The page shows reached stations, flagged stations, statuses and missing readings for the selected parameter and historical cutoff.
 - **Pollution Events**: PriorityQueue-ordered historical events based on severity and recency. Inspecting an event applies its historical cutoff, focuses the station, and opens reading history.
 - **Repeated Exceedance Analysis**: Identifies stations exceeding thresholds across 2 or more reporting periods or distinct sample dates.
 - **Critical Location Ranking**: Custom `Comparator<River_node>` ordering stations, confluences, and tributaries based on upstream maximum pollutant ratio multiplied by node risk weight (confluence 1.5, reservoir 1.3, tributary 1.1, station 1.0).
@@ -65,7 +65,7 @@ Create a Java Project with Java 17 or newer, turn off `module-info` creation, th
 
 1. Open Overview. Click one of the attention cards (e.g. Kanpur upstream - Shuklaganj) to focus the station and inspect all 4 parameter metrics (BOD, DO, pH, FC).
 2. Open Stations. Filter by status `Exceeds threshold` or search `Kanpur`. Click `Select` to focus.
-3. Click `Trace connections`. Choose `Upstream` or `Downstream`, and `BFS` or `DFS`. Click `Show next step` to view each connection one step at a time, or `Show all` for the complete traversal.
+3. Open `River Explorer` from the navigation or click `Trace connections` in the Focus Station panel. The focused station is selected as the start. Choose `Upstream` or `Downstream`, and `BFS` or `DFS`. Use Play/Pause, Show next step or Show all to inspect the Java traversal. Use Reset trace to rewind it, or Reset view to restore map zoom and position.
 4. Open Pollution & Analysis. Review the list of prioritized events. Click `Inspect` on a 2022 event: the interface applies `2022` as a cutoff and opens Reading History.
 5. In Reading History, examine the 2022 annual summary. Click `Next` to step forward to the 2023 record. Click `Return to latest` in the filter bar when done.
 6. Click `+ Add reading`. Select station `1067`, parameter `BOD`, value `5.8`, and a sample date/time. Click `Save reading`. The new sample appears as a `SAMPLE` entry alongside existing `ANNUAL` summaries.
@@ -79,9 +79,9 @@ Create a Java Project with Java 17 or newer, turn off `module-info` creation, th
 | --- | --- | --- |
 | **Model** | `src/model/River_node.java`, `Monitoring_station.java`, `Confluence.java`, `Tributary.java`, `Reservoir.java` | Node hierarchy, risk weights, polymorphism, and adjacency links. |
 | **Readings** | `src/model/Reading.java`, `Annual_reading.java`, `Sample_reading.java`, `Pollutant.java`, `Severity.java`, `Pollution_event.java` | Polymorphic measurement model distinguishing annual summaries from dated samples, CPCB criteria, severity classification, and event priority comparison. |
-| **Service** | `src/service/River_network.java`, `Tracer.java`, `Source_tracer.java`, `Impact_tracer.java`, `Trace_walk.java` | River network graph lookup, BFS and DFS traversal algorithms. |
+| **Service** | `src/service/River_network.java`, `Tracer.java`, `Source_tracer.java`, `Impact_tracer.java`, `Trace_walk.java`, `Segment_network.java` | OOP river nodes and Java BFS/DFS over actual directed HydroRIVERS segment IDs, station mapping, predecessor edges and downstream BFS route finding. |
 | **Analysis** | `src/service/Event_manager.java` | PriorityQueue event retrieval, recurring period exceedance detection, and cumulative upstream risk scoring. |
 | **Storage & Util** | `src/util/Storage.java`, `Json.java`, `Invalid_reading.java`, `Station_not_found.java` | Local CSV persistence, atomic file writing, JSON serialization, and custom checked exceptions. |
-| **Server** | `src/Main.java` | Java HTTP server, REST API endpoints (`/api/state`, `/api/readings`, `/api/update`, `/api/delete`), static web serving, and request validation. |
-| **Frontend** | `web/index.html`, `web/app.js`, `web/style.css` | Accessible vanilla HTML/CSS/JavaScript interface with no visualization charts, maps, or graph animations. |
-| **Data** | `data/nodes.csv`, `links.csv`, `readings.csv`, `records.csv`, `stations.csv`, `rivers.csv`, `segments.csv`, `station_mapping.csv`, `licenses/` | CPCB NWQMP monitoring data, HydroRIVERS reach geometries and topologies, and source license attributions. |
+| **Server** | `src/Main.java` | Java HTTP server, REST API endpoints (`/api/state`, `/api/network`, `/api/trace`, `/api/route`, `/api/readings`, `/api/update`, `/api/delete`), static web serving, and request validation. |
+| **Frontend** | `web/index.html`, `web/app.js`, `web/style.css` | Accessible vanilla HTML/CSS/JavaScript interface. River Explorer renders original GeoJSON reaches and animates Java traversal results. |
+| **Data** | `data/nodes.csv`, `links.csv`, `readings.csv`, `records.csv`, `stations.csv`, `rivers.csv`, `segments.csv`, `station_mapping.csv`, `network.geojson`, `licenses/` | CPCB NWQMP monitoring data, HydroRIVERS reach geometries and topologies, and source license attributions. |

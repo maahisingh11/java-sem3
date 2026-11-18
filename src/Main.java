@@ -14,12 +14,14 @@ import util.*;
 public class Main {
     private static River_network network;
     private static Storage storage;
+    private static Segment_network segment_network;
     private static Event_manager manager = new Event_manager();
 
     public static void main(String[] args) throws Exception {
         int port = args.length == 0 ? 8080 : Integer.parseInt(args[0]);
         storage = new Storage(Path.of("data"));
         network = storage.load();
+        segment_network = new Segment_network(Path.of("data"));
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.createContext("/", Main::handle);
         server.start();
@@ -30,9 +32,13 @@ public class Main {
     private static void handle(HttpExchange request) throws IOException {
         try {
             String path = request.getRequestURI().getPath();
-            if (path.equals("/api/state") && request.getRequestMethod().equals("GET")) {
+            if (request.getRequestMethod().equals("GET") && path.startsWith("/api/")) {
                 Map<String, String> query = parse(request.getRequestURI().getRawQuery());
-                send(request, 200, state(query), "application/json");
+                if (path.equals("/api/state")) send(request, 200, state(query), "application/json");
+                else if (path.equals("/api/network")) send(request, 200, network_json(query), "application/json");
+                else if (path.equals("/api/trace")) send(request, 200, trace_json(query), "application/json");
+                else if (path.equals("/api/route")) send(request, 200, route_json(query), "application/json");
+                else send(request, 404, "{\"error\":\"API route not found.\"}", "application/json");
             } else if ((path.equals("/api/readings") || path.equals("/api/update") || path.equals("/api/delete"))
                     && request.getRequestMethod().equals("POST")) {
                 String origin = request.getRequestHeaders().getFirst("Origin");
@@ -49,6 +55,8 @@ public class Main {
                 change_reading(path, form);
                 send(request, path.equals("/api/readings") ? 201 : 200,
                         "{\"message\":\"Reading " + (path.equals("/api/delete") ? "deleted" : "saved") + ".\"}", "application/json");
+            } else if (request.getRequestMethod().equals("GET") && path.equals("/network.geojson")) {
+                send(request, 200, Files.readString(Path.of("data", "network.geojson")), "application/geo+json");
             } else if (request.getRequestMethod().equals("GET") &&
                     (path.equals("/") || path.equals("/style.css") || path.equals("/app.js"))) {
                 String file = path.equals("/") ? "index.html" : path.substring(1);
@@ -134,19 +142,9 @@ public class Main {
     }
 
     private static String state(Map<String, String> query) throws Exception {
-        Pollutant pollutant = Pollutant.valueOf(query.getOrDefault("pollutant", "BOD"));
+        Pollutant pollutant = selected_pollutant(query);
         String until_param = query.getOrDefault("until", "").trim();
-        LocalDateTime until;
-        if (until_param.isEmpty()) {
-            until = LocalDateTime.now();
-        } else if (until_param.length() == 4) {
-            until = LocalDateTime.of(Integer.parseInt(until_param), 12, 31, 23, 59, 59);
-        } else {
-            until = LocalDateTime.parse(until_param);
-        }
-        if (until.isAfter(LocalDateTime.now().plusDays(1))) {
-            throw new IllegalArgumentException("Replay time cannot be in the future.");
-        }
+        LocalDateTime until = selected_until(until_param);
 
         List<Monitoring_station> all_stations = network.get_stations();
         if (all_stations.isEmpty()) {
@@ -199,21 +197,6 @@ public class Main {
             }
         }
 
-        String algorithm = query.getOrDefault("algorithm", "BFS");
-        if (!algorithm.equals("BFS") && !algorithm.equals("DFS")) {
-            throw new IllegalArgumentException("Choose BFS or DFS.");
-        }
-        Tracer source = new Source_tracer(algorithm.equals("DFS"));
-        Tracer impact = new Impact_tracer(algorithm.equals("DFS"));
-        List<String> upstream = new ArrayList<>();
-        List<String> downstream = new ArrayList<>();
-        for (River_node node : source.trace(selected)) {
-            upstream.add(node_json(node, pollutant, until));
-        }
-        for (River_node node : impact.trace(selected)) {
-            downstream.add(node_json(node, pollutant, until));
-        }
-
         List<River_node> ranked = network.get_nodes();
         Collections.sort(ranked, (first, second) ->
                 Double.compare(manager.risk_score(second, pollutant, until), manager.risk_score(first, pollutant, until)));
@@ -247,12 +230,9 @@ public class Main {
         }
 
         return "{\"metrics\":" + Json.array(metrics)
-                + ",\"algorithm\":" + Json.text(algorithm)
                 + ",\"stations\":" + Json.array(stations)
                 + ",\"events\":" + Json.array(events)
                 + ",\"history\":" + Json.array(history)
-                + ",\"upstream\":" + Json.array(upstream)
-                + ",\"downstream\":" + Json.array(downstream)
                 + ",\"recurring\":" + Json.array(recurring)
                 + ",\"critical\":" + Json.array(critical)
                 + ",\"times\":" + Json.array(times)
@@ -263,6 +243,140 @@ public class Main {
                 + ",\"unit\":" + Json.text(pollutant.get_unit())
                 + ",\"rule\":" + Json.text(pollutant.get_rule())
                 + ",\"until\":" + Json.text(until_param.isEmpty() ? "Latest records" : until_param) + "}";
+    }
+
+
+    private static Pollutant selected_pollutant(Map<String, String> query) {
+        return Pollutant.valueOf(query.getOrDefault("pollutant", "BOD"));
+    }
+
+    private static LocalDateTime selected_until(String until_param) {
+        LocalDateTime until;
+        if (until_param == null || until_param.isBlank()) {
+            until = LocalDateTime.now();
+        } else if (until_param.length() == 4) {
+            until = LocalDateTime.of(Integer.parseInt(until_param), 12, 31, 23, 59, 59);
+        } else {
+            until = LocalDateTime.parse(until_param);
+        }
+        if (until.isAfter(LocalDateTime.now().plusDays(1))) {
+            throw new IllegalArgumentException("Replay time cannot be in the future.");
+        }
+        return until;
+    }
+
+    private static String network_json(Map<String, String> query) throws Exception {
+        Pollutant pollutant = selected_pollutant(query);
+        LocalDateTime until = selected_until(query.getOrDefault("until", "").trim());
+        List<String> segments = new ArrayList<>();
+        for (Segment_network.Segment segment : segment_network.get_segments()) {
+            segments.add("{\"id\":" + Json.text(segment.id)
+                    + ",\"next\":" + Json.text(segment.next)
+                    + ",\"longitude\":" + segment.longitude
+                    + ",\"latitude\":" + segment.latitude
+                    + ",\"length_km\":" + segment.length_km + "}");
+        }
+        List<String> stations = new ArrayList<>();
+        for (Monitoring_station station : network.get_stations()) {
+            String segment_id = segment_network.get_station_segment(station.get_id());
+            Reading reading = manager.latest(station, pollutant, until);
+            String status = reading == null ? "NO DATA" : reading.get_severity().name();
+            stations.add("{\"id\":" + Json.text(station.get_id())
+                    + ",\"name\":" + Json.text(station.get_name())
+                    + ",\"region\":" + Json.text(station.get_region())
+                    + ",\"segment_id\":" + Json.text(segment_id)
+                    + ",\"status\":" + Json.text(status)
+                    + ",\"reading\":" + reading_json(reading) + "}");
+        }
+        return "{\"segments\":" + Json.array(segments)
+                + ",\"stations\":" + Json.array(stations)
+                + ",\"pollutant\":" + Json.text(pollutant.name())
+                + ",\"until\":" + Json.text(query.getOrDefault("until", "")) + "}";
+    }
+
+    private static String trace_json(Map<String, String> query) throws Exception {
+        String station_id = required(query, "station");
+        String direction = query.getOrDefault("direction", "upstream");
+        String algorithm = query.getOrDefault("algorithm", "BFS").toUpperCase(Locale.ROOT);
+        if (!direction.equals("upstream") && !direction.equals("downstream")) {
+            throw new IllegalArgumentException("Choose upstream or downstream.");
+        }
+        if (!algorithm.equals("BFS") && !algorithm.equals("DFS")) {
+            throw new IllegalArgumentException("Choose BFS or DFS.");
+        }
+        Pollutant pollutant = selected_pollutant(query);
+        LocalDateTime until = selected_until(query.getOrDefault("until", "").trim());
+        network.find_station(station_id);
+        Segment_network.Walk_result result = segment_network.trace(station_id, direction.equals("upstream"), algorithm.equals("DFS"));
+
+        List<String> segments = new ArrayList<>();
+        for (String id : result.order) {
+            String parent_id = result.parent.get(id);
+            segments.add("{\"id\":" + Json.text(id)
+                    + ",\"parent\":" + (id.equals(parent_id) ? "null" : Json.text(parent_id)) + "}");
+        }
+        List<String> edges = new ArrayList<>();
+        for (String[] edge : result.edges) {
+            edges.add("{\"from\":" + Json.text(edge[0]) + ",\"to\":" + Json.text(edge[1]) + "}");
+        }
+        List<String> stations = new ArrayList<>();
+        List<String> flagged = new ArrayList<>();
+        for (String id : result.station_ids) {
+            Monitoring_station station = network.find_station(id);
+            Reading reading = manager.latest(station, pollutant, until);
+            String row = station_trace_json(station, segment_network.get_station_segment(id), reading);
+            stations.add(row);
+            if (reading != null && reading.get_severity() != Severity.NORMAL) flagged.add(row);
+        }
+        return "{\"start\":" + Json.text(station_id)
+                + ",\"direction\":" + Json.text(direction)
+                + ",\"algorithm\":" + Json.text(algorithm)
+                + ",\"segment_count\":" + result.order.size()
+                + ",\"station_count\":" + stations.size()
+                + ",\"flagged_count\":" + flagged.size()
+                + ",\"segments\":" + Json.array(segments)
+                + ",\"edges\":" + Json.array(edges)
+                + ",\"stations\":" + Json.array(stations)
+                + ",\"flagged\":" + Json.array(flagged) + "}";
+    }
+
+    private static String route_json(Map<String, String> query) throws Exception {
+        String start_id = required(query, "start");
+        String destination_id = required(query, "destination");
+        Pollutant pollutant = selected_pollutant(query);
+        LocalDateTime until = selected_until(query.getOrDefault("until", "").trim());
+        network.find_station(start_id);
+        network.find_station(destination_id);
+        Segment_network.Route_result result = segment_network.downstream_route(start_id, destination_id);
+        List<String> segments = new ArrayList<>();
+        for (String id : result.segments) segments.add(Json.text(id));
+        List<String> edges = new ArrayList<>();
+        for (String[] edge : result.edges) {
+            edges.add("{\"from\":" + Json.text(edge[0]) + ",\"to\":" + Json.text(edge[1]) + "}");
+        }
+        Monitoring_station start_station = network.find_station(start_id);
+        Monitoring_station destination_station = network.find_station(destination_id);
+        return "{\"found\":" + result.found
+                + ",\"start\":" + Json.text(start_id)
+                + ",\"destination\":" + Json.text(destination_id)
+                + ",\"same_station\":" + result.same_station
+                + ",\"same_segment\":" + result.same_segment
+                + ",\"hops\":" + result.hops
+                + ",\"segments\":" + Json.array(segments)
+                + ",\"edges\":" + Json.array(edges)
+                + ",\"start_name\":" + Json.text(start_station.get_name())
+                + ",\"destination_name\":" + Json.text(destination_station.get_name())
+                + ",\"pollutant\":" + Json.text(pollutant.name())
+                + ",\"until\":" + Json.text(query.getOrDefault("until", "")) + "}";
+    }
+
+    private static String station_trace_json(Monitoring_station station, String segment_id, Reading reading) {
+        return "{\"id\":" + Json.text(station.get_id())
+                + ",\"name\":" + Json.text(station.get_name())
+                + ",\"region\":" + Json.text(station.get_region())
+                + ",\"segment_id\":" + Json.text(segment_id)
+                + ",\"status\":" + Json.text(reading == null ? "NO DATA" : reading.get_severity().name())
+                + ",\"reading\":" + reading_json(reading) + "}";
     }
 
     private static String node_json(River_node node, Pollutant pollutant, LocalDateTime until) {
