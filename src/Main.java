@@ -1,27 +1,38 @@
+//used for representing one http req
 import com.sun.net.httpserver.HttpExchange;
+//creates the backend web server
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+//specifies server address and ports
 import java.net.InetSocketAddress;
+
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.util.*;
+//c ustom models, servicies, and stuff
 import model.*;
 import service.*;
 import util.*;
 
 public class Main {
+    // object for loading the river network
     private static River_network network;
+    // object resposible for loading and saving data
     private static Storage storage;
+    // for loading the segment network
     private static Segment_network segment_network;
+    // object that manages all the events ; load, create, edit, delete, etc
     private static Event_manager manager = new Event_manager();
 
     public static void main(String[] args) throws Exception {
+        // Ternary condition: if no command-line argument is given use port 8080; otherwise parse the first argument as an integer.
         int port = args.length == 0 ? 8080 : Integer.parseInt(args[0]);
         storage = new Storage(Path.of("data"));
         network = storage.load();
         segment_network = new Segment_network(Path.of("data"));
+        // Create a server bound to THIS computer (127.0.0.1) on the chosen port; 0 uses the default connection backlog.
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.createContext("/", Main::handle);
         server.start();
@@ -31,40 +42,55 @@ public class Main {
 
     private static void handle(HttpExchange request) throws IOException {
         try {
+            // Extract the path, e.g. /api/state
             String path = request.getRequestURI().getPath();
+            // GET requests under /api/ ask the backend to RETURN data
             if (request.getRequestMethod().equals("GET") && path.startsWith("/api/")) {
+                // Convert URL query text such as pollutant=BOD&station=1067 into a map of keys and values.
                 Map<String, String> query = parse(request.getRequestURI().getRawQuery());
+                // Dashboard endpoint: build state JSON and send HTTP 200 (success).
+                //also return whatever option / bfs/dfs you select in this
                 if (path.equals("/api/state")) send(request, 200, state(query), "application/json");
                 else if (path.equals("/api/network")) send(request, 200, network_json(query), "application/json");
                 else if (path.equals("/api/trace")) send(request, 200, trace_json(query), "application/json");
                 else if (path.equals("/api/route")) send(request, 200, route_json(query), "application/json");
                 else send(request, 404, "{\"error\":\"API route not found.\"}", "application/json");
+            // POST endpoints modify readings: add, update, or delete
             } else if ((path.equals("/api/readings") || path.equals("/api/update") || path.equals("/api/delete"))
                     && request.getRequestMethod().equals("POST")) {
                 String origin = request.getRequestHeaders().getFirst("Origin");
                 String host = request.getRequestHeaders().getFirst("Host");
+
+                //forbidden handling
                 if (origin != null && !origin.equals("http://" + host)) {
                     send(request, 403, "{\"error\":\"Request origin is not allowed.\"}", "application/json");
                     return;
                 }
+                //reject large byte requests so that does not overload;
                 byte[] body = request.getRequestBody().readNBytes(8193);
                 if (body.length > 8192) {
                     throw new IllegalArgumentException("Request is too large.");
                 }
+                //parsing into form fields
                 Map<String, String> form = parse(new String(body, StandardCharsets.UTF_8));
+                //apply whatever operation
                 change_reading(path, form);
+                //201=created for a new reading
+                //200=successful whatever query
                 send(request, path.equals("/api/readings") ? 201 : 200,
                         "{\"message\":\"Reading " + (path.equals("/api/delete") ? "deleted" : "saved") + ".\"}", "application/json");
             } else if (request.getRequestMethod().equals("GET") && path.equals("/network.geojson")) {
                 send(request, 200, Files.readString(Path.of("data", "network.geojson")), "application/geo+json");
             } else if (request.getRequestMethod().equals("GET") &&
                     (path.equals("/") || path.equals("/style.css") || path.equals("/app.js"))) {
+                        //for the river map to be displayed
                 String file = path.equals("/") ? "index.html" : path.substring(1);
                 String type = file.endsWith("html") ? "text/html" : file.endsWith("css") ? "text/css" : "text/javascript";
                 send(request, 200, Files.readString(Path.of("web", file)), type);
             } else {
                 send(request, 404, "{\"error\":\"Page or method not found.\"}", "application/json");
             }
+            //error handling
         } catch (Station_not_found error) {
             send(request, 404, "{\"error\":" + Json.text(error.getMessage()) + "}", "application/json");
         } catch (IllegalArgumentException | Invalid_reading | java.time.format.DateTimeParseException error) {
@@ -76,30 +102,36 @@ public class Main {
             request.close();
         }
     }
-
+    //for the edit form ; 
     private static void change_reading(String path, Map<String, String> form) throws Exception {
         Monitoring_station station = network.find_station(required(form, "station"));
         Pollutant pollutant = Pollutant.valueOf(required(form, "pollutant"));
         Reading old = null;
         if (!path.equals("/api/readings")) {
+            //find the existing using time label
             String old_time = required(form, "old_time");
             for (Reading reading : station.get_readings()) {
+                //match both pollutant and reading to identify reading
                 if (reading.get_pollutant() == pollutant && reading.get_time_label().equals(old_time)) {
                     old = reading;
                 }
             }
+            //if no old reading found
             if (old == null) {
                 throw new IllegalArgumentException("That reading no longer exists. Refresh the page.");
             }
             double old_value = Double.parseDouble(required(form, "old_value"));
+            //prevents overwriting
             if (Double.compare(old.get_value(), old_value) != 0) {
                 throw new IllegalArgumentException("That reading has changed. Refresh before editing it.");
             }
         }
+        //new reading added
         Reading added = null;
         if (!path.equals("/api/delete")) {
             double value = Double.parseDouble(required(form, "value"));
             String time_str = required(form, "time");
+            //4 character object treated as year
             if (time_str.length() == 4) {
                 added = new Annual_reading(pollutant, Integer.parseInt(time_str), value, value, "MANUAL");
             } else {
@@ -127,7 +159,8 @@ public class Main {
         }
         return value;
     }
-
+    //input handler for strings
+    //parser to convert the string values to hash map
     private static Map<String, String> parse(String text) {
         Map<String, String> result = new HashMap<>();
         if (text == null || text.isEmpty()) {
@@ -135,17 +168,21 @@ public class Main {
         }
         for (String part : text.split("&")) {
             String[] pair = part.split("=", 2);
+            //decodes key value and stores them to  amap
             result.put(URLDecoder.decode(pair[0], StandardCharsets.UTF_8),
                     pair.length == 2 ? URLDecoder.decode(pair[1], StandardCharsets.UTF_8) : "");
         }
         return result;
     }
-
+//assembling the dashboard
     private static String state(Map<String, String> query) throws Exception {
+        //determine the pollutant
         Pollutant pollutant = selected_pollutant(query);
         String until_param = query.getOrDefault("until", "").trim();
+        //convert to a local date time
         LocalDateTime until = selected_until(until_param);
 
+        //retrive every monitoring station
         List<Monitoring_station> all_stations = network.get_stations();
         if (all_stations.isEmpty()) {
             throw new IllegalArgumentException("No monitoring stations available.");
@@ -157,12 +194,17 @@ public class Main {
                 break;
             }
         }
+
+        //select 1067 if exists; if not, then erorr, if not then default 
         Monitoring_station selected = network.find_station(query.getOrDefault("station", default_station_id));
 
+        //all station reached 
         List<String> stations = new ArrayList<>();
         List<String> recurring = new ArrayList<>();
         int abnormal = 0;
         int count = 0;
+
+        //process every monitoring station (for anomalies)
         for (Monitoring_station station : all_stations) {
             Reading latest = manager.latest(station, pollutant, until);
             if (latest != null && latest.get_severity() != Severity.NORMAL) {
@@ -181,15 +223,22 @@ public class Main {
                 }
             }
         }
+        //above function converts stuff to json so that the reqs can be processed easily =- also checks for violations
+        //atleast 2 violation periods = reccruing
+        //counts historical reading matching 
 
+
+        //collects pollution events 
         List<String> events = new ArrayList<>();
         for (Pollution_event event : manager.get_events(network, until)) {
             if (event.get_reading().get_pollutant() == pollutant) {
+                //keeps only matching historical events cutoff
                 events.add("{\"station\":" + Json.text(event.get_station().get_name()) + ",\"id\":"
                         + Json.text(event.get_station().get_id()) + ",\"reading\":" + reading_json(event.get_reading()) + "}");
             }
         }
 
+        //retirves river nodes to match by pollution risk
         List<String> history = new ArrayList<>();
         for (Reading reading : selected.get_readings()) {
             if (reading.get_pollutant() == pollutant && manager.is_valid_until(reading, until)) {
@@ -197,6 +246,8 @@ public class Main {
             }
         }
 
+
+        //introdcuces threshhold to filter out flagged readings 
         List<River_node> ranked = network.get_nodes();
         Collections.sort(ranked, (first, second) ->
                 Double.compare(manager.risk_score(second, pollutant, until), manager.risk_score(first, pollutant, until)));
@@ -216,6 +267,8 @@ public class Main {
                 timeline.add(reading.get_time_label());
             }
         }
+
+        //converts time to json
         for (String time_item : timeline) {
             times.add(Json.text(time_item));
         }
@@ -229,6 +282,8 @@ public class Main {
                     + ",\"reading\":" + reading_json(manager.latest(selected, item, until)) + "}");
         }
 
+
+        //more json
         return "{\"metrics\":" + Json.array(metrics)
                 + ",\"stations\":" + Json.array(stations)
                 + ",\"events\":" + Json.array(events)
@@ -245,11 +300,12 @@ public class Main {
                 + ",\"until\":" + Json.text(until_param.isEmpty() ? "Latest records" : until_param) + "}";
     }
 
-
+    //parses to bod (every pollution metric to bod)
     private static Pollutant selected_pollutant(Map<String, String> query) {
         return Pollutant.valueOf(query.getOrDefault("pollutant", "BOD"));
     }
 
+    //intrepret the historical replay
     private static LocalDateTime selected_until(String until_param) {
         LocalDateTime until;
         if (until_param == null || until_param.isBlank()) {
@@ -265,6 +321,7 @@ public class Main {
         return until;
     }
 
+    //json for river exceptions and segments
     private static String network_json(Map<String, String> query) throws Exception {
         Pollutant pollutant = selected_pollutant(query);
         LocalDateTime until = selected_until(query.getOrDefault("until", "").trim());
@@ -294,6 +351,8 @@ public class Main {
                 + ",\"until\":" + Json.text(query.getOrDefault("until", "")) + "}";
     }
 
+
+    //explore upstream/downstream using bfs/dfs
     private static String trace_json(Map<String, String> query) throws Exception {
         String station_id = required(query, "station");
         String direction = query.getOrDefault("direction", "upstream");
@@ -339,7 +398,7 @@ public class Main {
                 + ",\"stations\":" + Json.array(stations)
                 + ",\"flagged\":" + Json.array(flagged) + "}";
     }
-
+    //downstream route between two stations
     private static String route_json(Map<String, String> query) throws Exception {
         String start_id = required(query, "start");
         String destination_id = required(query, "destination");
@@ -404,7 +463,7 @@ public class Main {
                 + ",\"rule\":" + Json.text(reading.get_pollutant().get_rule())
                 + ",\"severity\":" + Json.text(reading.get_severity().name()) + "}";
     }
-
+//sends metadata to browser
     private static void send(HttpExchange request, int code, String text, String type) throws IOException {
         byte[] data = text.getBytes(StandardCharsets.UTF_8);
         request.getResponseHeaders().set("Content-Type", type + "; charset=utf-8");
