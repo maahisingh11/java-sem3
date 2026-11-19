@@ -1,8 +1,8 @@
 package model;
-
+// How bad a reading is.
 public enum Severity {
     NORMAL, LOW, MEDIUM, HIGH, CRITICAL;
-
+ // ratio = value / limit  severity level
     public static Severity from_ratio(double ratio) {
         if (ratio <= 1.0) return NORMAL;
         if (ratio <= 1.5) return LOW;

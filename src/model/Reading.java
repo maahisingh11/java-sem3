@@ -1,7 +1,7 @@
 package model;
 
 import java.time.LocalDateTime;
-
+// each subclass of reading must provide the body for the methods and comparable used for natural sorting , we have used an abstract class because we want a shared template of sorts 
 public abstract class Reading implements Comparable<Reading> {
     protected final Pollutant pollutant;
 
@@ -9,6 +9,7 @@ public abstract class Reading implements Comparable<Reading> {
         if (pollutant == null) {
             throw new IllegalArgumentException("Pollutant cannot be null.");
         }
+        // exception handling
         this.pollutant = pollutant;
     }
 
@@ -33,7 +34,7 @@ public abstract class Reading implements Comparable<Reading> {
     public abstract double get_ratio();
 
     public abstract Severity get_severity();
-
+  // part of inheritance and also to sort chronologically 
     @Override
     public int compareTo(Reading other) {
         return get_effective_time().compareTo(other.get_effective_time());
